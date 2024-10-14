@@ -2,6 +2,9 @@ import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import * as os from "os";
+import { CsProjFile } from "./csproj-file";
+
+const LABEL_SHOW_DOTNET_VERSION = "Show .NET version";
 
 export function activate(context: vscode.ExtensionContext) {
   let disposable = vscode.commands.registerCommand(
@@ -34,7 +37,18 @@ export function activate(context: vscode.ExtensionContext) {
         },
       });
 
-      const graph = generateProjectGraph();
+      const config = await vscode.window.showQuickPick(
+        [LABEL_SHOW_DOTNET_VERSION],
+        {
+          canPickMany: true,
+          title: "Show:",
+        }
+      );
+
+      const showDotnetVersion =
+        config?.some((op) => op === LABEL_SHOW_DOTNET_VERSION) ?? false;
+
+      const graph = generateProjectGraph(showDotnetVersion);
 
       if (graph === undefined) {
         return;
@@ -54,7 +68,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {}
 
-function generateProjectGraph(): string | undefined {
+function generateProjectGraph(showDotnetVersion: boolean): string | undefined {
   const workspaceFolders = vscode.workspace.workspaceFolders;
 
   if (!workspaceFolders) {
@@ -74,45 +88,35 @@ function generateProjectGraph(): string | undefined {
   const csprojFiles = findCsprojFiles(workspacePath);
 
   if (csprojFiles.length === 0) {
+    vscode.window.showErrorMessage("No csproj files found");
     return undefined;
   }
 
-  let dependenciesMap = new Map<string, string[]>();
-  if (csprojFiles.length > 0) {
-    csprojFiles.forEach((file, index) => {
-      const content = getCsprojContent(file.path);
+  let dependenciesMap = new Map<
+    string,
+    { dependencies: string[]; dotnetVersion: string }
+  >();
+  csprojFiles.forEach((file, index) => {
+    const content = getCsprojContent(file.path);
 
-      let deps: string[] = [];
-      for (let i = 0; i < csprojFiles.length; i++) {
-        if (i === index) {
-          continue;
-        }
-
-        if (content.includes(csprojFiles[i].name)) {
-          deps.push(csprojFiles[i].name);
-        }
+    let deps: string[] = [];
+    for (let i = 0; i < csprojFiles.length; i++) {
+      if (i === index) {
+        continue;
       }
 
-      dependenciesMap.set(file.name, deps);
+      if (content.includes(csprojFiles[i].name)) {
+        deps.push(csprojFiles[i].name);
+      }
+    }
+
+    dependenciesMap.set(file.name, {
+      dependencies: deps,
+      dotnetVersion: showDotnetVersion ? extractProjectVersion(content) : "",
     });
+  });
 
-    let dependenciesGraph = "";
-
-    dependenciesMap.forEach((value, key) => {
-      value.forEach((value) => {
-        dependenciesGraph += `"${key}"->"${value}";`;
-      });
-    });
-
-    const digraph = `
-		digraph G{
-			${dependenciesGraph}
-  }`;
-
-    return digraph;
-  }
-
-  return "";
+  return generateDigraphTemplate(dependenciesMap, showDotnetVersion);
 }
 
 function isSolutionDirectory(dir: string): boolean {
@@ -122,7 +126,6 @@ function isSolutionDirectory(dir: string): boolean {
 
 function findCsprojFiles(dir: string): CsProjFile[] {
   let results: CsProjFile[] = [];
-
   const files = fs.readdirSync(dir);
 
   files.forEach((file: string) => {
@@ -155,7 +158,48 @@ function getCsprojContent(filePath: string): string {
   }
 }
 
-export interface CsProjFile {
-  name: string;
-  path: string;
+function extractProjectVersion(content: string) {
+  const targetFrameworkTag = "<TargetFramework>";
+  const indexOfTargetFramework = content.indexOf(targetFrameworkTag);
+
+  let versionPosition = indexOfTargetFramework + targetFrameworkTag.length;
+
+  let version = "";
+  while (content[versionPosition] !== "<") {
+    version = version + content[versionPosition];
+    versionPosition += 1;
+  }
+
+  return version;
+}
+
+function generateDigraphTemplate(
+  dependenciesMap: Map<
+    string,
+    { dependencies: string[]; dotnetVersion: string }
+  >,
+  showDotnetVersion: boolean
+) {
+  let dependenciesGraph = "";
+
+  dependenciesMap.forEach((value, key) => {
+    if (showDotnetVersion) {
+      dependenciesGraph += `"${key}" [
+            label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
+                <TR><TD><FONT POINT-SIZE="14">${key}</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="10">${value.dotnetVersion}</FONT></TD></TR>
+              </TABLE>>
+        ];`;
+    }
+    value.dependencies.forEach((deps) => {
+      dependenciesGraph += `"${key}"->"${deps}";`;
+    });
+  });
+
+  const digraph = `
+		digraph G{
+			${dependenciesGraph}
+  }`;
+
+  return digraph;
 }
