@@ -3,40 +3,21 @@ import * as path from "path";
 import * as vscode from "vscode";
 import * as os from "os";
 import { CsProjFile } from "./csproj-file";
+import { CsprojFileDetails } from "./csproj-file-details";
 
 const LABEL_SHOW_DOTNET_VERSION = "Show .NET version";
+const DEFAULT_GRAPH_FILE_NAME = "dependency-graph.dot";
 
 export function activate(context: vscode.ExtensionContext) {
   let disposable = vscode.commands.registerCommand(
     "csharp-dependency-graph.generate",
     async () => {
-      const fileName =
-        os.platform() === "win32"
-          ? "\\dependency-graph.dot"
-          : "/dependency-graph.dot";
-      const workspaceFolders = vscode.workspace.workspaceFolders;
-      const defaultFilePath =
-        workspaceFolders === undefined
-          ? fileName
-          : workspaceFolders[0].uri.fsPath + fileName;
-
       const filePath = await vscode.window.showInputBox({
         placeHolder: "Enter the file path to save the graph",
         prompt: "Output file path",
-        value: defaultFilePath,
-        validateInput: (input) => {
-          const dirPath = path.dirname(input);
-          if (!input) {
-            return "Output file path cannot be empty";
-          } else if (!input.endsWith(".dot")) {
-            return "Output file path must be a .dot file";
-          } else if (!fs.existsSync(dirPath)) {
-            return "Directory doesn't exist, please choose a valid path";
-          }
-          return null;
-        },
+        value: buildDefaultFilePath(),
+        validateInput: validateFilePath,
       });
-
       const config = await vscode.window.showQuickPick(
         [LABEL_SHOW_DOTNET_VERSION],
         {
@@ -45,20 +26,20 @@ export function activate(context: vscode.ExtensionContext) {
         }
       );
 
-      const showDotnetVersion =
+      const showVersion =
         config?.some((op) => op === LABEL_SHOW_DOTNET_VERSION) ?? false;
 
-      const graph = generateProjectGraph(showDotnetVersion);
+      const graph = generateProjectGraph(showVersion);
 
-      if (graph === undefined) {
+      if (graph === undefined || filePath === undefined) {
         return;
       }
 
       try {
-        fs.writeFileSync(filePath!, graph);
+        fs.writeFileSync(filePath, graph);
         vscode.window.showInformationMessage("File created at: " + filePath);
       } catch (err) {
-        vscode.window.showErrorMessage("Error occured: " + err);
+        vscode.window.showErrorMessage("Unexpected error: " + err);
       }
     }
   );
@@ -67,6 +48,26 @@ export function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {}
+
+function buildDefaultFilePath(): string {
+  const directorySeparator = os.platform() === "win32" ? "\\" : "/";
+  const fileName = directorySeparator + DEFAULT_GRAPH_FILE_NAME;
+  return vscode.workspace.workspaceFolders === undefined
+    ? fileName
+    : vscode.workspace.workspaceFolders[0].uri.fsPath + fileName;
+}
+
+function validateFilePath(input: string): string | null {
+  const dirPath = path.dirname(input);
+  if (!input) {
+    return "Output file path cannot be empty";
+  } else if (!input.endsWith(".dot")) {
+    return "Output file path must be a .dot file";
+  } else if (!fs.existsSync(dirPath)) {
+    return "Directory doesn't exist, please choose a valid path";
+  }
+  return null;
+}
 
 function generateProjectGraph(showDotnetVersion: boolean): string | undefined {
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -92,31 +93,29 @@ function generateProjectGraph(showDotnetVersion: boolean): string | undefined {
     return undefined;
   }
 
-  let dependenciesMap = new Map<
-    string,
-    { dependencies: string[]; dotnetVersion: string }
-  >();
-  csprojFiles.forEach((file, index) => {
-    const content = getCsprojContent(file.path);
+  const csprojFilesDetails: CsprojFileDetails[] = csprojFiles.map(
+    (file, index) => {
+      const content = getCsprojContent(file.path);
+      let deps: string[] = [];
+      for (let i = 0; i < csprojFiles.length; i++) {
+        if (i === index) {
+          continue;
+        }
 
-    let deps: string[] = [];
-    for (let i = 0; i < csprojFiles.length; i++) {
-      if (i === index) {
-        continue;
+        if (content.includes(csprojFiles[i].name)) {
+          deps.push(csprojFiles[i].name);
+        }
       }
 
-      if (content.includes(csprojFiles[i].name)) {
-        deps.push(csprojFiles[i].name);
-      }
+      return {
+        name: file.name,
+        dependencies: deps,
+        dotnetVersion: showDotnetVersion ? extractProjectVersion(content) : "",
+      };
     }
+  );
 
-    dependenciesMap.set(file.name, {
-      dependencies: deps,
-      dotnetVersion: showDotnetVersion ? extractProjectVersion(content) : "",
-    });
-  });
-
-  return generateDigraphTemplate(dependenciesMap, showDotnetVersion);
+  return generateDigraphTemplate(csprojFilesDetails, showDotnetVersion);
 }
 
 function isSolutionDirectory(dir: string): boolean {
@@ -174,30 +173,28 @@ function extractProjectVersion(content: string) {
 }
 
 function generateDigraphTemplate(
-  dependenciesMap: Map<
-    string,
-    { dependencies: string[]; dotnetVersion: string }
-  >,
+  csprojFileDetails: CsprojFileDetails[],
   showDotnetVersion: boolean
 ) {
   let dependenciesGraph = "";
 
-  dependenciesMap.forEach((value, key) => {
+  csprojFileDetails.forEach((csproj) => {
     if (showDotnetVersion) {
-      dependenciesGraph += `"${key}" [
+      dependenciesGraph += `"${csproj.name}" [
             label=<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0">
-                <TR><TD><FONT POINT-SIZE="14">${key}</FONT></TD></TR>
-                <TR><TD><FONT POINT-SIZE="10">${value.dotnetVersion}</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="14">${csproj.name}</FONT></TD></TR>
+                <TR><TD><FONT POINT-SIZE="10">${csproj.dotnetVersion}</FONT></TD></TR>
               </TABLE>>
         ];`;
     }
-    value.dependencies.forEach((deps) => {
-      dependenciesGraph += `"${key}"->"${deps}";`;
+    csproj.dependencies.forEach((deps) => {
+      dependenciesGraph += `"${csproj.name}"->"${deps}";`;
     });
   });
 
   const digraph = `
 		digraph G{
+      node [shape = box;];
 			${dependenciesGraph}
   }`;
 
